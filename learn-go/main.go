@@ -1,13 +1,11 @@
 package main
 
 import (
-	"errors"
 	"fmt"
-	"net/http"
 	"sync"
-)
 
-var errRequestFailed = errors.New("request failed")
+	"github.com/jinwook-song/learn-go/urlchecker"
+)
 
 func main() {
 	urls := []string{
@@ -25,7 +23,7 @@ func main() {
 		go func(url string) {
 			defer wg.Done()
 			status := "OK"
-			if err := hitURL(url); err != nil {
+			if err := urlchecker.HitURL(url); err != nil {
 				status = "FAILED"
 			}
 			resultChan <- struct{ url, status string }{url, status}
@@ -48,14 +46,4 @@ func main() {
 	for url, result := range results {
 		fmt.Printf("%s: %s\n", url, result)
 	}
-}
-
-func hitURL(url string) error {
-	fmt.Println("Checking:", url)
-	resp, err := http.Get(url)
-	if err != nil || resp.StatusCode >= 400 {
-		return errRequestFailed
-	}
-	defer resp.Body.Close()
-	return nil
 }
