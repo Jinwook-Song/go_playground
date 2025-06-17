@@ -25,19 +25,19 @@ const fileName string = "jobs/" + searchWord + ".csv"
 func main() {
 	var jobs []extractedJob
 	totalPages := getPages()
-	// 결과를 받을 채널 생성
-	c := make(chan []extractedJob)
+	// 페이지 결과를 받을 채널
+	pageChannel := make(chan []extractedJob)
 
 	fmt.Printf("총 %d 페이지를 스크래핑합니다.\n", totalPages)
 
 	for i := 1; i <= totalPages; i++ {
-		// getPage 함수를 고루틴으로 실행
-		go getPage(i, c)
+		// getPage 함수를 고루틴으로 실행 (1단계 병렬화)
+		go getPage(i, pageChannel)
 	}
 
-	// 모든 고루틴으로부터 결과를 수집
+	// 모든 페이지로부터 결과를 수집
 	for range totalPages {
-		extractedJobs := <-c
+		extractedJobs := <-pageChannel
 		jobs = append(jobs, extractedJobs...)
 	}
 
@@ -46,7 +46,6 @@ func main() {
 }
 
 func writeJobs(jobs []extractedJob) {
-	// jobs 디렉토리가 없으면 생성
 	if _, err := os.Stat("jobs"); os.IsNotExist(err) {
 		os.Mkdir("jobs", 0755)
 	}
@@ -63,16 +62,14 @@ func writeJobs(jobs []extractedJob) {
 	checkErr(headerErr)
 
 	for _, job := range jobs {
-		// 링크를 포함한 ID로 변경
-		jobLink := "https://www.saramin.co.kr/zf_user/jobs/relay/view?rec_idx=" + job.id
+		jobLink := job.id
 		csvLine := []string{jobLink, job.title, job.location}
 		csvError := w.Write(csvLine)
 		checkErr(csvError)
 	}
 }
 
-// getPage는 이제 채널을 인자로 받아 결과를 채널로 보냅니다.
-func getPage(page int, c chan<- []extractedJob) {
+func getPage(page int, pageChannel chan<- []extractedJob) {
 	pageUrl := baseUrl + "&recruitPage=" + strconv.Itoa(page)
 	fmt.Println("Requesting:", pageUrl)
 	res, err := http.Get(pageUrl)
@@ -84,37 +81,52 @@ func getPage(page int, c chan<- []extractedJob) {
 	doc, err := goquery.NewDocumentFromReader(res.Body)
 	checkErr(err)
 
+	// extractJobs는 이제 내부적으로 고루틴을 사용
 	jobs := extractJobs(doc)
-	// 함수가 끝날 때 결과를 채널로 보냄
-	c <- jobs
+	pageChannel <- jobs
 }
 
+// extractJobs는 이제 페이지 내의 각 공고를 병렬로 처리하는 오케스트레이터가 됩니다.
 func extractJobs(doc *goquery.Document) []extractedJob {
-	jobs := []extractedJob{}
-	doc.Find(".item_recruit").Each(func(i int, s *goquery.Selection) {
-		// 'rec_idx' 속성으로 ID를 가져오도록 수정
-		id, _ := s.Attr("rec_idx")
-		title := cleanString(s.Find(".job_tit a").Text())
-		location := cleanString(s.Find(".job_condition span a").Text())
+	var jobs []extractedJob
+	// 각 채용공고 카드를 개별 고루틴에서 처리하기 위한 채널
+	jobChannel := make(chan extractedJob)
+	cards := doc.Find(".item_recruit")
 
-		job := extractedJob{
-			id:       id,
-			title:    title,
-			location: location,
-		}
-		jobs = append(jobs, job)
+	cards.Each(func(i int, card *goquery.Selection) {
+		// 각 카드에 대해 extractJob 함수를 고루틴으로 실행 (2단계 병렬화)
+		go extractJob(card, jobChannel)
 	})
+
+	// 모든 고루틴으로부터 결과를 수집
+	for range cards.Length() {
+		job := <-jobChannel
+		jobs = append(jobs, job)
+	}
+
 	return jobs
+}
+
+// extractJob은 단일 채용 공고 카드를 파싱하여 결과를 채널로 보냅니다.
+func extractJob(card *goquery.Selection, c chan<- extractedJob) {
+	id, _ := card.Attr("value")
+	title := cleanString(card.Find(".job_tit a").Text())
+	location := cleanString(card.Find(".job_condition span a").Text())
+
+	// 파싱된 결과를 채널로 전송
+	c <- extractedJob{
+		id:       id,
+		title:    title,
+		location: location,
+	}
 }
 
 func cleanString(str string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(str)), " ")
 }
 
-// getPages 함수 로직을 더 견고하게 수정
 func getPages() int {
 	var pages int
-	// URL에 recruitPage=1을 추가하여 첫 페이지만 확실히 가져옴
 	firstPageUrl := baseUrl + "&recruitPage=1"
 	res, err := http.Get(firstPageUrl)
 
@@ -126,21 +138,16 @@ func getPages() int {
 	doc, err := goquery.NewDocumentFromReader(res.Body)
 	checkErr(err)
 
-	// 페이지네이션 영역에서 마지막 페이지 번호를 찾음
 	doc.Find(".pagination a").Each(func(i int, s *goquery.Selection) {
-		// 링크의 텍스트를 정수로 변환 시도
 		pageNumber, err := strconv.Atoi(s.Text())
-		// 에러가 없고, 현재 페이지 번호가 pages 변수보다 크면 업데이트
 		if err == nil && pageNumber > pages {
 			pages = pageNumber
 		}
 	})
 
-	// 페이지네이션이 없는 경우 (결과가 1페이지 이하인 경우)
 	if pages == 0 {
 		return 1
 	}
-
 	return pages
 }
 
